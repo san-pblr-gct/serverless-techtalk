@@ -1,0 +1,850 @@
+service: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}
+
+plugins:
+  - serverless-secrets-plugin
+  - serverless-domain-manager
+
+custom:
+  secrets: ${file(secrets.${opt:stage, self:provider.stage}.yml)}
+  customDomain:
+    domainName: ${self:custom.secrets.customDomain}
+    basePath: 'ebs'
+    stage: ${opt:stage, self:provider.stage}
+    certificateName: '*.****.com'
+    endpointType: 'regional'
+    createRoute53Record: false
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  vpc: 
+    securityGroupIds:
+      - ${self:custom.secrets.securityGroupIds}
+    subnetIds:
+      - ${self:custom.secrets.subnetIds1}
+      - ${self:custom.secrets.subnetIds2}
+  region: eu-west-1
+  stage: dev
+  websocketsApiName: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}
+  websocketsApiRouteSelectionExpression: $request.body.action
+  apiName: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}
+  profile: ${self:custom.secrets.profile}
+  basePath: /
+  apiKeys:
+    - emergency-services-key
+
+resources:
+  Resources:
+    KinesisStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: ${self:custom.secrets.EMStream}
+        ShardCount: 1
+
+functions:
+  authorizerFunc: 
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Security}-authorizerFunc
+    handler: src/auth.authorizer
+    # resultTtlInSeconds: 0
+    # identitySource: method.request.header.X-Requested-With
+    # type: request
+    # vpc:
+    #   securityGroupIds:
+    #     - ${self:custom.secrets.securityGroup}
+    #   subnetIds:
+    #     - ${self:custom.secrets.subnetIda}
+    #     - ${self:custom.secrets.subnetIdb}
+    # environment: # Function level environment variables
+    #   redisURL: ${self:custom.secrets.redisURL}
+  notificationStream:
+    handler: src/notification.listen
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-listenToNotification
+    environment: # Function level environment variables
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+
+    events:
+      - stream:
+        type: kinesis
+        batchSize: 1
+        arn: EMERGENCYBOARD-Communication-stream
+        startingPosition: LATEST
+    # environment: # Function level environment variables
+    #   EMList: ${self:custom.secrets.EMList}
+    #   StaffList: ${self:custom.secrets.StaffList}
+    #   CommunicationList: ${self:custom.secrets.CommunicationList}
+    #   CountryList: ${self:custom.secrets.CountryList}
+    #   ArchiveList: ${self:custom.secrets.ArchiveList}
+    #   WebSocketList: ${self:custom.secrets.WebSocketList}
+  staffStatusStream:
+    handler: src/staff.updateStatusCount
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-updateStaffStatusCount
+
+  staffMasterList_populate:
+    handler: src/masterList.populateStaff
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Scheduler}-populateMasterStaffList
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+    # events:
+    #   - schedule: rate(7 days)
+
+  staffMasterList_populateDeltaDiff:
+    handler: src/masterList.deltaDiffMasterStaffList
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Scheduler}-deltaDiffMasterStaffList
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+    events:
+      - schedule: rate(7 days)
+
+  staffMasterList_sendEmailtoStaffSchedular:
+    handler: src/masterList.sendEmailtoStaffSchedular
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Scheduler}-sendEmailtoStaffSchedular
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+      StaffEmailSQS: ${self:custom.secrets.StaffEmailSQS}
+    events:
+      - schedule: rate(30 minutes)
+
+  connection_connect:
+    handler: src/connection.connect
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}-connect
+    events:
+      - websocket:
+          route: $connect
+  connection_disconnect:
+    handler: src/connection.disconnect
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}-disconnect
+    events:
+      - websocket:
+          route: $disconnect
+  emergency_create:
+    handler: src/emergency.create
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-createEmergency
+    events:
+      - http:
+          path: emergency
+          method: post
+          cors: true
+          private: true
+          integration: lambda
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+          
+  emergency_close:
+    handler: src/emergency.close
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}-closeEmergency
+    events:
+      - websocket:
+          route: closeEmergency
+          
+  # emergency_infoToAll:
+  #   handler: src/emergency.infoToAll
+  #   name: EMERGENCYBOARD-Websocket-infoToAllEmergency
+  #   events:
+  #     - websocket:
+  #         route: infoToAllEmergency
+  message_send:
+    handler: src/message.send
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}-sendMessage
+    events:
+      - websocket:
+          route: sendMessage
+    environment: # Function level environment variables
+      wsURL: ${self:custom.secrets.wsURL}
+    
+  message_updateStaffCounts:
+    handler: src/message.updateStaffCounts
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.WebSocket}-updateStaffCountsWebSocket
+    events:
+      - websocket:
+          route: updateCount
+    environment: # Function level environment variables
+      wsURL: ${self:custom.secrets.wsURL}
+  
+  emergency_list:
+    handler: src/emergency.list
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-listEmergencies
+    events:
+      - http:
+          path: emergency
+          method: get
+          cors: true
+          integration: lambda
+          authorizer:
+            name: authorizerFunc
+            identitySource: method.request.header.Authorization
+            type: token
+            resultTtlInSeconds: 0
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode":200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode":400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode":401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode":403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode":404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode":422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode":500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode":502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode":504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+
+  country_list:
+    handler: src/country.list
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-countries
+    events:
+      - http:
+          path: country
+          method: get
+          cors: true
+          integration: lambda
+          authorizer:
+            name: authorizerFunc
+            identitySource: method.request.header.Authorization
+            type: token
+            resultTtlInSeconds: 0
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode":200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode":400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode":401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode":403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode":404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode":422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode":500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode":502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode":504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+
+
+  staff_list:
+    handler: src/staff.list
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-listStaffs
+    events:
+      - http:
+          path: staff
+          method: get
+          cors: true
+          private: true
+          integration: lambda
+          request:
+            parameters:
+              querystrings:
+                officeCode: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode":200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode":400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode":401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode":403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode":404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode":422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode":500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode":502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode":504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+  notification_send:
+    handler: src/notification.send
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-sendNotification
+    # environment: # Function level environment variables
+    #   EMStream: ${self:custom.secrets.EMStream}
+    events:
+      - http:
+          path: notification
+          method: post
+          cors: true
+          private: true
+          integration: lambda
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+  
+  notification_get:
+    handler: src/notification.get
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-getNotification
+    events:
+      - http:
+          path: notification
+          method: get
+          cors: true
+          integration: lambda
+          request:
+            parameters:
+              querystrings:
+                key: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+  communication_save:
+    handler: src/communication.save
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-saveCommunication
+    events:
+      - http:
+          path: communication
+          method: post
+          cors: true
+          private: true
+          integration: lambda
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+
+  communication_get:
+    handler: src/communication.get
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-getCommunication
+    events:
+      - http:
+          path: communication
+          method: get
+          cors: true
+          integration: lambda
+          request:
+            parameters:
+              querystrings:
+                key: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+
+  master_Distributionlist:
+    handler: src/masterList.getDistributionListByMail
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-DistributionListByMail
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+    events:
+      - http:
+          path: masterList
+          method: get
+          cors: true
+          private: true
+          integration: lambda
+          request:
+            parameters:
+              querystrings:
+                email: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode":200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode":400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode":401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode":403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode":404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode":422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode":500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode":502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode":504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+ 
+  staffMasterList_saveEmailStaffdetailtoSQS:
+    handler: src/masterList.saveEmailStaffdetailtoSQS
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-saveEmailStaffdetailtoSQS
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+      StaffMarkSafeUnSafeAPI: ${self:custom.secrets.StaffMarkSafeUnSafeAPI}
+      StaffEmailSQS: ${self:custom.secrets.StaffEmailSQS}
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_List_Stream}
+
+  staffMasterList_sendMailtoStaffFromSQS:
+    handler: src/masterList.sendMailtoStaffFromSQS
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-sendMailtoStaffFromSQS
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+      StaffMarkSafeUnSafeAPI: ${self:custom.secrets.StaffMarkSafeUnSafeAPI}
+      EMURL: ${self:custom.secrets.EMURL}
+  
+  staffMasterList_sendEmailtoDistributionList:
+    handler: src/masterList.sendEmailtoDistributionList
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-sendEmailtoDistributionList
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+      EMURL: ${self:custom.secrets.EMURL}
+
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_List_Stream}
+  
+  staffMasterList_updateupdateNotRepliedCount:
+    handler: src/masterList.updateNotRepliedCount
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-updateNotRepliedCount
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_List_Stream}
+  
+  archive_Staff:
+    handler: src/archive.archiveStaff
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-archiveStaff
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_List_Stream}
+  
+  staffMasterList_updateStaffStatusToEmergencyList:
+    handler: src/masterList.updateStaffStatusToEmergencyList
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-updateStaffStatusToEmergencyList
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_ADUserMasterList_Stream}
+  staffcounters:
+    handler: src/message.getcountsfromstreams
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Stream}-sendCountToWebSockets
+    events:
+      - stream: ${self:custom.secrets.EmergencyBoard_List_Stream}
+    environment: # Function level environment variables
+      wsURL: ${self:custom.secrets.wsURL}
+      
+  auth_getUserDetails:
+    handler: src/auth.getUserContext
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-getUserContext
+    # vpc:
+    #   securityGroupIds:
+    #     - ${self:custom.secrets.securityGroup}
+    #   subnetIds:
+    #     - ${self:custom.secrets.subnetIda}
+    #     - ${self:custom.secrets.subnetIdb}
+    environment: # Function level environment variables
+      Tenant: ${self:custom.secrets.Tenant}
+      AppPrincipalId: ${self:custom.secrets.AppPrincipalId}
+      AppPrincipalPassword: ${self:custom.secrets.AppPrincipalPassword}
+      emailURL: ${self:custom.secrets.emailURL}
+      SecurityToken: ${self:custom.secrets.SecurityToken}
+      # redisURL: ${self:custom.secrets.redisURL}
+
+    events:
+      - http:
+          path: auth
+          method: get
+          cors: true
+          private: true
+          integration: lambda
+          request:
+            parameters:
+              querystrings:
+                userid: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode":200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode":400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode":401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode":403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode":404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode":422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode":500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode":502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode":504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+    
+  emergency_getEmergencyByKey:
+    handler: src/emergency.getEmergencyByKey
+    name: ${self:custom.secrets.ApplicationName}-${self:custom.secrets.Services}-getEmergencyByKey
+    events:
+      - http:
+          path: emergency/{key}
+          method: Get
+          cors: true
+          integration: lambda
+          request:
+            parameters:
+              paths:
+                key: true
+              querystrings:
+                sortKey: true
+          response:
+            headers:
+              Content-Type: "'text/html'"
+            template: $input.path('$')
+            statusCodes:
+                200:
+                    pattern: '.*"statusCode": 200,.*'
+                    template:
+                      application/json: $input.path("$.body")
+                400:
+                    pattern: '.*"statusCode": 400,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                401:
+                    pattern: '.*"statusCode": 401,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                403:
+                    pattern: '.*"statusCode": 403,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage") 
+                404:
+                    pattern: '.*"statusCode": 404,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                422:
+                    pattern: '.*"statusCode": 422,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                500:
+                    pattern: '.*"statusCode": 500,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                502:
+                    pattern: '.*"statusCode": 502,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")
+                504:
+                    pattern: '.*"statusCode": 504,.*'
+                    template:
+                      application/json: $input.path("$.errorMessage")

@@ -1,0 +1,14 @@
+service: ${file(serverless-${env:PROVIDER}.yml):service}
+
+
+plugins: ${file(serverless-${env:PROVIDER}.yml):plugins}
+
+
+provider: ${file(serverless-${env:PROVIDER}.yml):provider}
+
+
+functions:
+    getSomething: ${file(serverless-${env:PROVIDER}.yml):functions.hello}
+    createSomething: ${file(serverless-${env:PROVIDER}.yml):functions.hello1}
+    updateSomething: ${file(serverless-${env:PROVIDER}.yml):functions.updateSomething}
+    deleteSomething: ${file(serverless-${env:PROVIDER}.yml):functions.deleteSomething}
