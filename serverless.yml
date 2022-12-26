@@ -1,15 +1,4 @@
-
-
 service: serverless-jumpstart
-plugins:
-  - serverless-secrets-plugin
-# app and org for use with dashboard.serverless.com
-#app: your-app-name
-#org: your-org-name
-
-# You can pin your service to only deploy with a specific Serverless version
-# Check out our docs for more details
-# frameworkVersion: "=X.X.X"
 
 provider:
   name: aws
@@ -47,36 +36,34 @@ provider:
 #  exclude:
 #    - exclude-me.js
 #    - exclude-me-dir/**
-custom:
-  secrets: ${file(secrets.${opt:stage, self:provider.stage}.yml)}
 
 functions:
   hello:
     handler: handler.hello
     environment: # Function level environment variables
-      SESSION_KEY: ${self:custom.secrets.SESSION_KEY}
-      EMAIL_SERVICE_API_KEY: ${self:custom.secrets.EMAIL_SERVICE_API_KEY}
+      SESSION_KEY: TEST
+      EMAIL_SERVICE_API_KEY: APOI
     events:
-     - schedule: rate(5 minutes) #cloudwatch scheduler
-     - http:  
-         path: demo
-         method: get
-         cors: true
-         private: false
+      - schedule: rate(5 minutes) #cloudwatch scheduler
+      - http:
+          path: demo
+          method: get
+          cors: true
+          private: false
 
   hello1:
     handler: handler1.hello
     environment: # Function level environment variables
-      SESSION_KEY: ${self:custom.secrets.SESSION_KEY}
-      EMAIL_SERVICE_API_KEY: ${self:custom.secrets.EMAIL_SERVICE_API_KEY}
+      SESSION_KEY: TEST
+      EMAIL_SERVICE_API_KEY: KEY
 
     events:
-     # - schedule: rate(5 minutes) #cloudwatch scheduler
-     - http:  
-         path: demo1
-         method: get
-         cors: true
-         private: false
+      # - schedule: rate(5 minutes) #cloudwatch scheduler
+      - http:
+          path: demo1
+          method: get
+          cors: true
+          private: false
 #    The following are a few example events you can configure
 #    NOTE: Please make sure to change your handler code to work with those events
 #    Check the event documentation for details
